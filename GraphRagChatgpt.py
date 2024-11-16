@@ -47,6 +47,14 @@ os.environ["NEO4J_PASSWORD"] = NEO4J_PASSWORD
 # Add FAISS import
 from langchain.vectorstores import FAISS
 
+# Add utils imports
+from utils import (
+    create_optimized_text_splitter,
+    create_optimized_faiss_index,
+    optimized_similarity_search,
+    process_document_batch
+)
+
 class Entities(BaseModel):
     """Identifying information about entities."""
     names: List[str] = Field(
@@ -55,7 +63,7 @@ class Entities(BaseModel):
     )
 
 def initialize_and_load_pdf():
-    """Load PDF content and store with both FAISS vector store and Neo4j knowledge graph"""
+    """Load PDF content and store with both optimized FAISS vector store and Neo4j knowledge graph"""
     driver = GraphDatabase.driver(
         NEO4J_URI,
         auth=(NEO4J_USERNAME, NEO4J_PASSWORD)
@@ -64,16 +72,23 @@ def initialize_and_load_pdf():
     # Initialize embeddings
     embeddings = OpenAIEmbeddings()
     
-    # Load and process PDF
+    # Load and process PDF with optimized text splitter
     loader = PyPDFLoader(PDF_FILE)
     documents = loader.load()
     
-    text_splitter = TokenTextSplitter(chunk_size=1000, chunk_overlap=100)
+    text_splitter = create_optimized_text_splitter(
+        chunk_size=1000,
+        chunk_overlap=200
+    )
     chunks = text_splitter.split_documents(documents)
     
-    # Create FAISS vector store
-    vector_store = FAISS.from_documents(chunks, embeddings)
-    vector_store.save_local("faiss_index_chatgpt")
+    # Create optimized FAISS vector store
+    vector_store = create_optimized_faiss_index(
+        chunks=chunks,
+        embeddings=embeddings,
+        index_name="faiss_index_chatgpt",
+        batch_size=1000
+    )
     
     # Initialize ChatGPT for entity extraction
     llm = ChatOpenAI(temperature=0, model_name=OPENAI_MODEL)
@@ -82,58 +97,27 @@ def initialize_and_load_pdf():
         # Clear existing data
         session.run("MATCH (n) DETACH DELETE n")
         
-        # Process each chunk for knowledge graph
-        for i, chunk in enumerate(chunks):
-            # Store document content
-            session.run(
-                """
-                CREATE (d:Document {
-                    id: $id,
-                    content: $content,
-                    page: $page
-                })
-                """,
-                {
-                    "id": f"chunk_{i}",
-                    "content": chunk.page_content,
-                    "page": chunk.metadata.get('page', 0)
-                }
+        # Process documents in batches
+        batch_size = 50  # Adjust based on your needs
+        for i in range(0, len(chunks), batch_size):
+            batch_chunks = chunks[i:i + batch_size]
+            process_document_batch(
+                batch_chunks=batch_chunks,
+                session=session,
+                llm=llm,
+                start_idx=i
             )
-            
-            # Extract entities and relationships
-            entity_prompt = ChatPromptTemplate.from_messages([
-                ("system", """Extract key entities and their relationships from the text.
-                             Focus on: Colleges, Courses, Requirements, Processes, Documents"""),
-                ("human", chunk.page_content)
-            ])
-            
-            entity_chain = entity_prompt | llm | StrOutputParser()
-            entities = entity_chain.invoke({})
-            
-            # Create entity nodes and relationships
-            session.run(
-                """
-                MATCH (d:Document {id: $chunk_id})
-                WITH d
-                UNWIND $entities as entity
-                MERGE (e:Entity {name: entity})
-                CREATE (d)-[:CONTAINS]->(e)
-                """,
-                {
-                    "chunk_id": f"chunk_{i}",
-                    "entities": entities.split('\n')
-                }
-            )
+            print(f"Processed batch {i//batch_size + 1}/{(len(chunks) + batch_size - 1)//batch_size}")
     
     driver.close()
-    print(f"Loaded {len(chunks)} chunks from PDF with knowledge graph and vector store")
+    print(f"Loaded {len(chunks)} chunks from PDF with optimized knowledge graph and vector store")
     return chunks
 
 def ask_question(question: str):
-    """Ask a question using vector similarity and knowledge graph"""
+    """Ask a question using optimized vector similarity and knowledge graph"""
     llm = ChatOpenAI(temperature=0, model_name=OPENAI_MODEL)
     
-    # Load vector store
+    # Load vector store with optimizations
     embeddings = OpenAIEmbeddings()
     vector_store = FAISS.load_local(
         "faiss_index_chatgpt", 
@@ -141,8 +125,13 @@ def ask_question(question: str):
         allow_dangerous_deserialization=True
     )
     
-    # Get relevant documents using vector similarity
-    similar_docs = vector_store.similarity_search(question, k=3)
+    # Use optimized similarity search
+    similar_docs = optimized_similarity_search(
+        question=question,
+        vector_store=vector_store,
+        k=3,
+        nprobe=10
+    )
     vector_context = "\n".join([doc.page_content for doc in similar_docs])
     
     driver = GraphDatabase.driver(
