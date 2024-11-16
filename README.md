@@ -1,21 +1,33 @@
-# Graph RAG System
+# Advanced Graph RAG System
 
-A Retrieval-Augmented Generation (RAG) system that combines graph-based knowledge representation with language models for question answering.
+This project implements an advanced Retrieval-Augmented Generation (RAG) system using knowledge graphs and vector embeddings, with support for multiple LLM providers (OpenAI, Google's Gemini, and Groq).
 
 ## Features
 
-- Graph-based knowledge representation using Neo4j
-- Hybrid retrieval combining structured and unstructured data
-- Conversational memory for follow-up questions
-- Wikipedia data integration
-- Graph visualization capabilities
+- Multiple LLM support (OpenAI GPT, Google Gemini, Groq)
+- Hybrid retrieval combining:
+  - Knowledge Graph (Neo4j)
+  - Vector Similarity (FAISS)
+- Optimized for large documents:
+  - Batched processing
+  - Efficient text splitting
+  - Optimized vector search
+- Error handling and robustness
+- Streamlit UI interface (optional)
 
-## Requirements
+## Prerequisites
 
-- Python 3.8+
+- Python 3.9+
 - Neo4j Database
-- OpenAI API key
-- Required Python packages (see requirements.txt)
+- API keys for the LLM providers you plan to use
+
+## Installation
+
+1. Clone the repository:
+
+```bash
+git clone https://github.com/xHishamSaeedx/AdvancedGraphRag.git
+```
 
 ## Setup
 
