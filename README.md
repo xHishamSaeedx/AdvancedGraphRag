@@ -137,3 +137,6 @@ MIT License
 - Neo4j for graph database
 - LangChain for the framework
 - Wikipedia for the source data
+
+python -m venv venv
+venv\Scripts\activate
