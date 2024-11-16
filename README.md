@@ -1,6 +1,6 @@
-# Advanced Graph RAG System
+# Advanced Hybrid RAG
 
-A sophisticated Retrieval-Augmented Generation (RAG) system that combines knowledge graphs and vector embeddings, supporting multiple LLM providers (OpenAI, Google's Gemini, and Groq) for enhanced document question-answering.
+A sophisticated hybrid Retrieval-Augmented Generation (RAG) system that combines knowledge graphs and vector embeddings, supporting multiple LLM providers (OpenAI, Google's Gemini, and Groq) for enhanced document question-answering.
 
 ## Features
 
@@ -42,8 +42,8 @@ A sophisticated Retrieval-Augmented Generation (RAG) system that combines knowle
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/yourusername/AdvancedGraphRag.git
-cd AdvancedGraphRag
+git clone https://github.com/yourusername/AdvancedHybridRag.git
+cd AdvancedHybridRag
 ```
 
 2. Create and activate virtual environment:
