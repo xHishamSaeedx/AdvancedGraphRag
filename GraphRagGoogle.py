@@ -51,7 +51,10 @@ from utils import (
     create_optimized_text_splitter,
     create_optimized_faiss_index,
     optimized_similarity_search,
-    process_document_batch
+    process_document_batch,
+    extract_entities,
+    create_entity_relationships,
+    merge_contexts
 )
 
 PDF_FILE = "txt_file_2.pdf"
@@ -127,13 +130,13 @@ def initialize_and_load_pdf():
     return chunks
 
 def ask_question(question: str):
-    """Ask a question using optimized vector similarity and knowledge graph"""
+    """Ask a question using both knowledge graph and vector store"""
     llm = ChatGoogleGenerativeAI(
         model=GOOGLE_MODEL,
         temperature=0
     )
     
-    # Load vector store with optimizations
+    # Get vector store results
     embeddings = GoogleGenerativeAIEmbeddings(
         model="models/embedding-001",
         google_api_key=GOOGLE_API_KEY
@@ -144,70 +147,78 @@ def ask_question(question: str):
         allow_dangerous_deserialization=True
     )
     
-    # Use optimized similarity search
     similar_docs = optimized_similarity_search(
         question=question,
         vector_store=vector_store,
-        k=3,
-        nprobe=10
+        k=3
     )
-    vector_context = "\n".join([doc.page_content for doc in similar_docs])
+    vector_contexts = [doc.page_content for doc in similar_docs]
     
+    # Get knowledge graph results
     driver = GraphDatabase.driver(
         NEO4J_URI,
         auth=(NEO4J_USERNAME, NEO4J_PASSWORD)
     )
     
     with driver.session() as session:
-        # Get relevant entities and their relationships
-        graph_result = session.run(
-            """
-            MATCH (d:Document)-[:CONTAINS]->(e:Entity)
-            WHERE e.name =~ $query
-            WITH d, e
-            MATCH (d)-[:CONTAINS]->(related:Entity)
-            RETURN DISTINCT e.name as entity, collect(DISTINCT related.name) as related
-            LIMIT 5
-            """,
-            {"query": f"(?i).*{question}.*"}
-        )
+        question_entities = extract_entities(question, llm)
         
-        # Format graph context
-        graph_context = []
+        graph_query = """
+        MATCH (e:Entity)
+        WHERE e.name IN $entities OR any(term IN $entities WHERE e.name CONTAINS term)
+        WITH e
+        MATCH (d:Document)-[:CONTAINS]->(e)
+        WITH d, e
+        MATCH (d)-[:CONTAINS]->(related:Entity)
+        WHERE related <> e
+        WITH d, e, collect(DISTINCT related.name) as related_entities
+        RETURN d.content as context, e.name as main_entity, related_entities
+        ORDER BY size(related_entities) DESC
+        LIMIT 5
+        """
+        
+        graph_result = session.run(graph_query, {"entities": question_entities})
+        
+        graph_contexts = []
         for record in graph_result:
-            entity = record["entity"]
-            related = record["related"]
-            graph_context.append(f"Entity: {entity}\nRelated concepts: {', '.join(related)}")
-        
-        graph_context = "\n".join(graph_context)
+            context = record["context"]
+            main_entity = record["main_entity"]
+            related = record["related_entities"]
+            graph_contexts.append({
+                "content": context,
+                "entity": main_entity,
+                "related": related
+            })
     
-    # Create combined prompt
+    # Merge contexts from both sources
+    merged_context = merge_contexts(
+        vector_contexts=vector_contexts,
+        graph_contexts=graph_contexts,
+        question=question
+    )
+    
+    # Create prompt
     prompt = ChatPromptTemplate.from_template("""
 You are a helpful assistant answering questions about a PDF document about college admissions and related topics.
-Use the information provided in the vector similarity results and knowledge graph context to answer the question.
+Use the combined context from vector search and knowledge graph to answer the question.
 
-Vector Similar Content:
-{vector_context}
-
-Knowledge Graph Context:
-{graph_context}
+Context:
+{merged_context}
 
 Question: {question}
 
 Instructions:
-1. Use both vector similarity results and knowledge graph relationships to provide comprehensive answers
+1. Use the provided context to give comprehensive answers
 2. If the information isn't available, say "The document doesn't contain information about [topic]"
 3. Be specific and cite relevant details from the document
 4. Keep answers clear and concise
 
 Answer:""")
     
-    # Get response
     chain = prompt | llm | StrOutputParser()
     
     return chain.invoke({
-        "vector_context": vector_context,
-        "graph_context": graph_context,
+        "merged_context": merged_context,
         "question": question
     })
 
