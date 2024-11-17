@@ -30,8 +30,13 @@ from utils import (
     extract_entities,
     create_entity_relationships,
     process_document_batch,
-    save_retrieval_results
+    save_retrieval_results,
+    merge_contexts
 )
+
+# Add back vector store imports
+from langchain_openai import OpenAIEmbeddings
+from langchain.vectorstores import FAISS
 
 PDF_FILE = "txt_file_2.pdf"
 
@@ -49,17 +54,18 @@ class Entities(BaseModel):
     )
 
 def initialize_and_load_pdf():
-    """Load PDF content into knowledge graph"""
+    """Load PDF content into both knowledge graph and vector store"""
     driver = GraphDatabase.driver(
         NEO4J_URI,
         auth=(NEO4J_USERNAME, NEO4J_PASSWORD)
     )
     
-    # Initialize Groq
+    # Initialize Groq and embeddings
     llm = ChatGroq(
         temperature=0,
         model_name=GROQ_MODEL
     )
+    embeddings = OpenAIEmbeddings()
     
     # Load and process PDF
     loader = PyPDFLoader(PDF_FILE)
@@ -72,7 +78,14 @@ def initialize_and_load_pdf():
     )
     chunks = text_splitter.split_documents(documents)
     
+    # Create vector store
+    print("Creating vector store...")
+    vector_store = FAISS.from_documents(chunks, embeddings)
+    vector_store.save_local("faiss_index_groq")
+    print("Vector store created and saved")
+    
     # Create knowledge graph
+    print("Creating knowledge graph...")
     with driver.session() as session:
         # Clear existing data
         session.run("MATCH (n) DETACH DELETE n")
@@ -90,16 +103,34 @@ def initialize_and_load_pdf():
             print(f"Processed batch {i//batch_size + 1}/{(len(chunks) + batch_size - 1)//batch_size}")
     
     driver.close()
-    print(f"Loaded {len(chunks)} chunks into knowledge graph")
+    print(f"Loaded {len(chunks)} chunks into knowledge graph and vector store")
     return chunks
 
 def ask_question(question: str):
-    """Ask a question using knowledge graph"""
+    """Ask a question using both knowledge graph and vector store"""
     llm = ChatGroq(
         temperature=0,
         model_name=GROQ_MODEL
     )
     
+    # Get vector store results
+    print("\nQuerying vector store...")
+    embeddings = OpenAIEmbeddings()
+    vector_store = FAISS.load_local(
+        "faiss_index_groq", 
+        embeddings,
+        allow_dangerous_deserialization=True
+    )
+    
+    similar_docs = vector_store.similarity_search(
+        question,
+        k=3
+    )
+    vector_contexts = [doc.page_content for doc in similar_docs]
+    print(f"Found {len(vector_contexts)} relevant documents from vector store")
+    
+    # Get knowledge graph results
+    print("\nQuerying knowledge graph...")
     driver = GraphDatabase.driver(
         NEO4J_URI,
         auth=(NEO4J_USERNAME, NEO4J_PASSWORD)
@@ -108,9 +139,9 @@ def ask_question(question: str):
     with driver.session() as session:
         # Extract entities from question
         question_entities = extract_entities(question, llm)
-        print(f"Extracted entities: {question_entities}")  # Debug print
+        print(f"Extracted entities: {question_entities}")
         
-        # Enhanced graph query to get more context
+        # Query knowledge graph
         graph_query = """
         MATCH (d:Document)
         WITH d
@@ -132,7 +163,6 @@ def ask_question(question: str):
         LIMIT 5
         """
         
-        print(f"Searching for entities: {question_entities}")
         graph_result = session.run(graph_query, {"entities": question_entities})
         
         # Process and format graph results
@@ -150,41 +180,36 @@ def ask_question(question: str):
                 "co_occurring": co_occurring
             })
         
-        print(f"Found {len(graph_contexts)} relevant contexts")  # Debug print
-        
-        # Format context for the prompt
-        formatted_contexts = []
-        for ctx in graph_contexts:
-            formatted_contexts.append(
-                f"Information about {ctx['entity']}:\n"
-                f"{ctx['content']}\n"
-                f"Related concepts: {', '.join(ctx['related'])}\n"
-                f"Co-occurring concepts: {', '.join(ctx['co_occurring'])}"
-            )
-        
-        context = "\n\n".join(formatted_contexts) if formatted_contexts else "No relevant information found."
+        print(f"Found {len(graph_contexts)} relevant contexts from knowledge graph")
     
-    # Save retrieval results for analysis
+    # Merge contexts from both sources
+    merged_context = merge_contexts(
+        vector_contexts=vector_contexts,
+        graph_contexts=graph_contexts,
+        question=question
+    )
+    
+    # Save retrieval results
     save_retrieval_results(
         question=question,
-        vector_contexts=[],  # Empty as we're not using vector store
+        vector_contexts=vector_contexts,
         graph_contexts=graph_contexts,
-        merged_context=context,
+        merged_context=merged_context,
         llm_type="groq"
     )
     
     # Create prompt
     prompt = ChatPromptTemplate.from_template("""
 You are a helpful assistant answering questions about a PDF document about college admissions and related topics.
-Use the provided knowledge graph context to answer the question.
+Use the combined context from both vector search and knowledge graph to answer the question.
 
-Context from Knowledge Graph:
-{context}
+Context:
+{merged_context}
 
 Question: {question}
 
 Instructions:
-1. Use the provided context and relationships to give comprehensive answers
+1. Use both semantic similarity matches and entity relationships to provide comprehensive answers
 2. If the information isn't available, say "The document doesn't contain information about [topic]"
 3. Be specific and cite relevant details from the document
 4. Keep answers clear and concise
@@ -194,7 +219,7 @@ Answer:""")
     chain = prompt | llm | StrOutputParser()
     
     return chain.invoke({
-        "context": context,
+        "merged_context": merged_context,
         "question": question
     })
 

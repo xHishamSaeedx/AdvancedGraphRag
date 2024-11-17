@@ -121,6 +121,7 @@ def ask_question(question: str):
     llm = ChatOpenAI(temperature=0, model_name=OPENAI_MODEL)
     
     # Get vector store results
+    print("\nQuerying vector store...")
     embeddings = OpenAIEmbeddings()
     vector_store = FAISS.load_local(
         "faiss_index_chatgpt", 
@@ -128,54 +129,80 @@ def ask_question(question: str):
         allow_dangerous_deserialization=True
     )
     
-    similar_docs = optimized_similarity_search(
-        question=question,
-        vector_store=vector_store,
+    similar_docs = vector_store.similarity_search(
+        question,
         k=3
     )
     vector_contexts = [doc.page_content for doc in similar_docs]
+    print(f"Found {len(vector_contexts)} relevant documents from vector store")
     
     # Get knowledge graph results
+    print("\nQuerying knowledge graph...")
     driver = GraphDatabase.driver(
         NEO4J_URI,
         auth=(NEO4J_USERNAME, NEO4J_PASSWORD)
     )
     
     with driver.session() as session:
+        # Extract entities from question
         question_entities = extract_entities(question, llm)
+        print(f"Extracted entities: {question_entities}")
         
+        # Query knowledge graph
         graph_query = """
-        MATCH (e:Entity)
-        WHERE e.name IN $entities OR any(term IN $entities WHERE e.name CONTAINS term)
-        WITH e
-        MATCH (d:Document)-[:CONTAINS]->(e)
+        MATCH (d:Document)
+        WITH d
+        MATCH (d)-[:CONTAINS]->(e:Entity)
+        WHERE any(term IN $entities WHERE toLower(e.name) CONTAINS toLower(term))
+           OR any(term IN $entities WHERE toLower(term) CONTAINS toLower(e.name))
         WITH d, e
         MATCH (d)-[:CONTAINS]->(related:Entity)
         WHERE related <> e
         WITH d, e, collect(DISTINCT related.name) as related_entities
-        RETURN d.content as context, e.name as main_entity, related_entities
-        ORDER BY size(related_entities) DESC
+        OPTIONAL MATCH (e)-[:CO_OCCURS_WITH]-(co:Entity)
+        WITH d, e, related_entities, collect(DISTINCT co.name) as co_occurring
+        RETURN 
+            d.content as context,
+            e.name as main_entity,
+            related_entities,
+            co_occurring
+        ORDER BY size(related_entities) + size(co_occurring) DESC
         LIMIT 5
         """
         
         graph_result = session.run(graph_query, {"entities": question_entities})
         
+        # Process and format graph results
         graph_contexts = []
         for record in graph_result:
             context = record["context"]
             main_entity = record["main_entity"]
             related = record["related_entities"]
+            co_occurring = record["co_occurring"]
+            
             graph_contexts.append({
                 "content": context,
                 "entity": main_entity,
-                "related": related
+                "related": related,
+                "co_occurring": co_occurring
             })
+        
+        print(f"Found {len(graph_contexts)} relevant contexts from knowledge graph")
     
     # Merge contexts from both sources
     merged_context = merge_contexts(
         vector_contexts=vector_contexts,
         graph_contexts=graph_contexts,
         question=question
+    )
+    
+    # Save retrieval results
+    save_retrieval_results(
+        question=question,
+        vector_contexts=vector_contexts,
+        graph_contexts=graph_contexts,
+        merged_context=merged_context,
+        llm_type="chatgpt"
     )
     
     # Create prompt
